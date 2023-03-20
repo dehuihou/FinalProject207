@@ -1,0 +1,831 @@
+---
+title: "STA 207 Course Project"
+date: " "
+output: html_document
+author: Dehui Hou
+---
+
+```{r echo=FALSE}
+knitr::opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE)
+
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(GGally)
+library(lme4)
+library(lmtest)
+library(pROC)
+library(gplots)
+library(car)
+library(kableExtra)
+library(grid)
+```
+
+
+# Abstract
+
+In this project, we are interested in understanding how visual stimuli would impact visual cortex activities and how visual cortex activities could be used, together with visual stimuli, to predict if a mouse could make a right decision. We used the data from the experiment in Steinmetz et al. (2019) to answer these questions. (1) ANOVA models and hypothesis testing are used to valid the hypothesis that the visual stimuli in both left and right sides have interactions to determine the neuron activities in the visual cortex. (2) Logistic regression and random forest models are used to predict the correctness of mouse movement. From the predictive model, we also learned that (a) fatigue effect may exists in these experiment data, and (b) neuron response in some time frame may be helpful in determine if the mouse will make a right movement.
+
+# Introduction
+
+Understanding how brain works is an important research topic. It does not only fulfill human curiosity, but also has practical impact to the development of areas including medical studies, psychology, computer science, artificial intelligence and so on. One open question in this research area is how the brain responds to visual stimuli, makes choice and executes the choice in order to obtain some rewards. There has been many studies on action selection. But most of them focuses on individual brain regions. Steinmetz et al. (2019) performed experiments on mice to further study how multiple brain regions collaborate together to accomplish the whole task from perception to execution.
+
+# Background
+
+Steinmetz et al. (2019) designed an experiment to record the neuron spikes of mice while the experimenters show different visual patterns and reward the mice if they responded in the correct way.
+
+In the experiment, the head of the mouse is fixed at a position that is surrounded by three displays: two displays on the left and right of the mouse is used to show patterns to the mouse; and a center display is used to show the expected action of the mouse to the human researchers and this center display is facing human not the mouse. Two pedals are set in front of the mouse's forepaws. They can be used by the mouse to turn a wheel to the left or right direction. If the mouse turned the wheel to the right direction, a reward of water will be given.
+
+The rules for the mouse are:
+
+* The two displays on the left and right sides will show patterns of different contrast levels. The levels include 0, 0.25, 0.5, and 1, where 0 represents showing nothing and 1 represents the highest contrast pattern. The total number of combinations of left and right patterns is 16.
+
+* The mouse will be rewarded by water if it turns the wheel to the correct side with higher contrast.
+
+* In the case of same contrast on both left and right sides, the mouse will be rewarded in half of the cases.
+
+While the mice are performing the task, probes are used to measure the activity of 30000 neurons. All probes are inserted into the **left hemisphere** of the brain.
+
+There are 10 mice performing 39 sessions of experiments. In each session, the mouse will be repeatedly showing randomly assigned left and right contrast levels (i.e., visual stimuli). Each repeat is called one trial. There are hundreds of trials in each session.
+
+In this project, we only focus on the visual cortex recordings in 5 sessions from the onset of the stimuli to 0.4 seconds after the onset.
+
+# Descriptive Analysis
+
+```{r read session data, echo=FALSE, eval=TRUE}
+session=list()
+for(i in 1:5){
+  session[[i]]=readRDS(paste('./data/session',i,'.rds',sep=''))
+}
+```
+
+## Variables
+
+There are five variables available in the data provided for this project, including:
+
+* `feedback_type`: represents whether the mouse's action is correct (1) or not (-1).
+* `contrast_left`: contrast of the left stimulus.
+* `contrast_right`: contrast of the right stimulus.
+* `time`: centers of the time bins for `spks`. This is evenly distributed and adjacent bins are 0.01 second apart.
+* `spks`: a matrix of representing the number of spikes for each neuron in each time bin (defined in `time`).
+
+```{r calculate mean firing rate and append other covariates}
+
+# Generate data for later use
+
+mean.firing.rate = data.frame()
+time.interval = 0.4
+for (session.id in 1:5) {
+  n.trials = length(session[[session.id]]$spks)
+  # n.trials.summary[session.id, 'n.trials']
+  for (trial.id in 1:n.trials) {
+    n.neurons = dim(session[[session.id]]$spks[[trial.id]])[1]
+    rate = sum(session[[session.id]]$spks[[trial.id]]) / n.neurons / time.interval
+    rate1 = sum(session[[session.id]]$spks[[trial.id]][, 10:14]) / n.neurons / 0.05
+    rate2 = sum(session[[session.id]]$spks[[trial.id]][, 16:20]) / n.neurons / 0.05
+    rate3 = sum(session[[session.id]]$spks[[trial.id]][, 21:25]) / n.neurons / 0.05
+    rate4 = sum(session[[session.id]]$spks[[trial.id]][, 26:30]) / n.neurons / 0.05
+    rate5 = sum(session[[session.id]]$spks[[trial.id]][, 31:35]) / n.neurons / 0.05
+    
+    mean.firing.rate = rbind(
+      mean.firing.rate,
+      data.frame(
+        session.id = session.id,
+        trial.id = trial.id,
+        mean.firing.rate = rate,
+        mean.firing.rate1 = rate1,
+        mean.firing.rate2 = rate2,
+        mean.firing.rate3 = rate3,
+        mean.firing.rate4 = rate4,
+        mean.firing.rate5 = rate5,
+        contrast.left = session[[session.id]]$contrast_left[trial.id],
+        contrast.right = session[[session.id]]$contrast_right[trial.id],
+        feedback.type = session[[session.id]]$feedback_type[trial.id],
+        mouse.name = session[[session.id]]$mouse_name
+      )
+    )
+  }
+}
+
+mean.firing.rate$contrast.left = as.factor(mean.firing.rate$contrast.left)
+mean.firing.rate$contrast.right = as.factor(mean.firing.rate$contrast.right)
+
+```
+
+## Data Dimension Summary
+
+As observed in the table below:
+
+* The numbers of neurons for all trials in one session are the same, but it varies from one session to another.
+
+* The number of trials range from 214 to 254 for each session. There is a coincidence in session 3 where the number of trials equals the number of neurons.
+
+```{r data dimension summary}
+
+n.trials.summary = data.frame(
+  session.id = 1:5,
+  n.trials = sapply(session, function(x) length(x$contrast_left))
+)
+
+n.neurons.session = list()
+for (i in 1:5) {
+  n.neurons.trials = sapply(session[[i]]$spks, function(x) dim(x)[1])
+  n.neurons.session[[i]] = c(
+    min.n.neurons=min(n.neurons.trials),
+    max.n.neurons = max(n.neurons.trials),
+    n.trials = n.trials.summary$n.trials[i]
+  )
+}
+n.neurons.session.df = data.frame(n.neurons.session)
+colnames(n.neurons.session.df) = c("Session 1", "Session 2", "Session 3", "Session 4", "Session 5")
+
+kbl(n.neurons.session.df, caption = "<center>Dimension of the Data for Each Session</center>", align = "l") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  kable_paper(bootstrap_options = "striped", full_width = F)
+
+```
+
+## Distribution of Trial Assignments
+
+There are 16 different combinations of left and right contrast levels. The percentage of each combinations in each session is shown in the following table.
+
+1. Ideally, we hope the assignment of these levels are completely random within a session. However, as observed below, some contrasts levels have much lower percentages than the other level combinations. For example, the contrasts of 1s on both sides represent only 1% of the trials; however, the contrasts of 0s on both sides represent 21% of the trials. It is unknown if this is due to a failure in random assignments or due to any other reasons.
+
+2. The distribution are mostly similar across different sessions. This is expected.
+
+```{r trial assignments distribution}
+
+n.trials.dist = mean.firing.rate %>%
+  group_by(contrast.left, contrast.right, session.id) %>%
+  summarise(n.trials = length(trial.id)) %>%
+  ungroup() %>%
+  pivot_wider(names_from=session.id, values_from=n.trials)
+
+cols = c('1','2','3','4','5')
+n.trials.dist[, cols] = round(n.trials.dist[, cols] / colSums(n.trials.dist[, cols]), 2)
+
+colnames(n.trials.dist) = c("Contrast.Left","Contrast.Right","Session.1", "Session.2", "Session.3", "Session.4", "Session.5")
+
+kbl(n.trials.dist, caption = "<center>Distribution of the Contrasts for Each Session</center>", align = "l") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  kable_classic_2(full_width = F) 
+```
+
+## Visualize Spike Data for Individual Trials
+
+The spike data for each trial is a matrix. Before aggregating them into single number to represent the overall activity level of the brain in a trial, we first look at the raw data to gain some intuition.
+
+The figure below shows a few examples. It is observed that:
+
+* When the constrasts of both sides are different, the neurons tend to be more active and generating more spikes.
+
+* When the stimuli have 0 contrasts on both side, the neurons tend to be the least active and generating fewer spikes.
+
+* Within each trial, some neurons are more active than others. The activation time of the neurons also differs. This may have some implications on how to define the outcome variables and features for the two problems we are interested in. We will discuss more details in the relevant sections.
+
+```{r visualize spike data, echo=FALSE}
+# Rename eval=TRUE if you want the output to appear in the report.
+# Take the 11th trial in Session 1 for example
+
+get.spike.df = function(session.id, trial.id) {
+  n.neurons = dim(session[[session.id]]$spks[[trial.id]])[1]
+  df = data.frame(session[[session.id]]$spks[[trial.id]])
+  df$neuron.id = 1:n.neurons
+  df = melt(df, id.vars='neuron.id', variable.name = 'time', value.name = 'n.spikes')
+  
+  # The time column generated from the melt function has values like X1, X2, ..., X39
+  # Here we convert it to seconds.
+  # Each time stamp are 0.01 second apart
+  df$time = as.numeric(substring(as.character(df$time), 2)) * 0.01
+  
+  df$session.id = session.id
+  df$trial.id = trial.id
+  df$feedback_type = session[[session.id]]$feedback_type[[trial.id]]
+  df$contrast_left = session[[session.id]]$contrast_left[[trial.id]]
+  df$contrast_right = session[[session.id]]$contrast_right[[trial.id]]
+  return(df)  
+}
+
+get.panel.label = function(session.id, trial.id) {
+  return(paste0(
+    'Trial ', trial.id,
+    ', L: ', session[[session.id]]$contrast_left[trial.id],
+    ', R: ', session[[session.id]]$contrast_right[trial.id]
+  ))
+}
+
+df1 = get.spike.df(1, 1)
+df18 = get.spike.df(1, 18)
+df97 = get.spike.df(1, 97)
+df17 = get.spike.df(1, 17)
+df.plot = rbind(df1, df18, df97, df17)
+
+panel.labels = c(
+  "1" = get.panel.label(1, 1),
+  "18" = get.panel.label(1, 18),
+  "97" = get.panel.label(1, 97),
+  "17" = get.panel.label(1, 17)
+)
+
+ggplot(df.plot, aes(x=time, y=neuron.id, fill=n.spikes)) +
+  geom_tile() +
+  scale_fill_viridis_c() +
+  facet_wrap(~trial.id, ncol=4, labeller = labeller(trial.id = panel.labels)) +
+  ggtitle('Spike Examples for 4 Trials') +
+  xlab('Time (seconds)') +
+  ylab('Neuron ID') +
+  labs(fill='# Spikes') +
+  theme(plot.title = element_text(hjust = 0.5))
+# plot(session[[1]]$time[[id]])
+```
+
+## Explore the Most Active Neurons
+
+From the previous subsection, we learned that there are both temporal and spatial patterns in the neuron firing spike counts. To better understand the patterns, we visualize the temporal pattern of the spikes in a few neurons and associate it with the feedback type (i.e., whether the mouse responded correctly).
+
+For each session, we identified the top neurons that are most active on average. The figure below shows how their firing rate change over time. Each curve representing one trial. A gental smoothing is used to enhance the appearance of the curves. As observed in the figure, the firing rate in some neurons during some period of time is highly indicative of the feedback type. For example,
+
+* Neuron 47 in session 1: the feedback is mostly correct when the firing rate is high around 0.2 to 0.3 seconds after the onset of the stimuli.
+
+* Neuron 14 in session 4: similar observed as above. High firing rate from 0.2 to 0.3 seconds is often tied to correct feedback.
+
+The time frame of 0.2 to 0.3 seconds are roughly in line with Figure 2(b) in Steinmetz et al. (2019), where the authors compared the VISpm neurons in correct choice cases and missed cases. In the missed cases, there are almost no spikes roughly around 0.2 seconds after the onset of the stimuli.
+
+This observation suggests that if we can locate the relevant neuron and relevant time frame from the training data, we will be able to predict the `feedback_type` reliably.
+
+Note: due to time constraint, we will only try a very simple approach in this project. We will not design algorithms to identify these neurons. But this could be a very interesting follow-up direction to pursue in the future.
+
+```{r plot top neurons, fig.width=10, fig.height=8}
+
+plot.top.neurons = function(session.id, n.top) {
+  n.trials = dim(session[[session.id]]$contrast_left)[1]
+  df_list = list()
+  for (trial.id in 1:n.trials) {
+    df_list[[trial.id]] = get.spike.df(session.id, trial.id)
+  }
+  spike.df = do.call(rbind, df_list)
+  
+  # rank the neurons by average firing rate
+  neurons.ranked = spike.df %>% group_by(neuron.id) %>%
+    summarise(n.spikes = mean(n.spikes)) %>%
+    arrange(-n.spikes)
+  
+  p = ggplot(
+    spike.df %>% filter(neuron.id %in% neurons.ranked$neuron.id[1:n.top]),
+    aes(x = time, y = n.spikes, group = trial.id, color=as.factor(feedback_type))
+  ) +
+    geom_smooth(method = 'loess', span=0.8, se=FALSE, linewidth=0.15, size=0.15) +
+    facet_wrap(~neuron.id, ncol=10) +
+    # coord_cartesian(ylim=c(-0.1, 2.1)) +
+    labs(color="Feedback") +
+    xlab('Time (second)') +
+    ylab('Number of Spikes') +
+    scale_y_continuous(labels = function(x) sprintf("%.2f", x)) +
+    ggtitle(paste0('Session ', session.id))
+  
+  return(p)
+}
+
+
+p1 = plot.top.neurons(1, 10)
+p2 = plot.top.neurons(2, 10)
+p3 = plot.top.neurons(3, 10)
+p4 = plot.top.neurons(4, 10)
+p5 = plot.top.neurons(5, 10)
+
+grid.arrange(p1, p2, p3, p4, p5, ncol = 1, top=textGrob("Distribution of Spikes for Each Session",gp=gpar(fontsize=18)))
+```
+
+
+
+
+```{r}
+# spike.s1.by.neuron.df$time.buckets = cut(spike.s1.by.neuron.df$time, c(0, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04))
+# spike.s1.by.neuron.df.agg = spike.s1.by.neuron.df %>% group_by(neuron.id, time.buckets, feedback_type) %>%
+#   summarise(n.spikes = mean(n.spikes))
+
+
+```
+
+
+## Data Exploration Related to Neural Responses to Stimuli
+
+The first question we are interested in is whether the left and right stimuli have additive effects on the neural responses. In this section, we will first define the calculation method for neural responses. Then we will explore the relation between stimuli and the neural responses.
+
+### Define Outcome Variable
+
+The mean firing rate per neuron per second is used as the outcome variable. The reasons are:
+
+* Since every neuron in the visual cortex may have a response to the stimuli. Mean firing rate can capture all the responses, while other statistics like median, and percentiles may not change if only a small part of the visual cortex responded to the stimuli.
+
+* We could use the timing of the neuron spikes to characterize the neuron responses. For example, the first time stamp where the firing rate ramps above a threshold could be used to describe how fast the neurons respond to the stimuli. Since this involves the choice of a threshold and need some more complex algorithm to detect the first ramp, we choose not to use this definition for the time-constrained course project.
+
+Limitations of this definition:
+
+* Some noise may be captured by the mean firing rate, especially when this covers the entire time span and all neurons. This may reduce the significance of the results.
+
+### Distribution of Mean Firing Rate
+
+The following figure shows the histogram of mean firing rate for each session. The main observations are:
+
+* The shape of the distribution is close to normal but slightly skewed. This looks reasonable since the mean firing rate is essentially a summation of thousands of spike number for maybe slightly correlated neuron and time-bin pairs.
+
+* There are potential outliers. Based on 1.5 times Inter-Quantile Range rule, there are one outlier for session 1 and 3 outliers for session 4. Here we do not remove them because these values are mean of many data points and should be sufficiently stable and robust to these a few not-too-extreme outliers.
+
+* The mean and variance vary across sessions. This may pose some challenges to model building.
+
+```{r histogram of mean firing rate}
+ggplot(mean.firing.rate, aes(x=mean.firing.rate)) + geom_histogram() +
+  facet_wrap(~session.id, ncol=5) +
+  ggtitle("Histogram of Mean Firing Rate in Each Session") +
+  xlab("Mean Firing Rate") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+As described above, the mean firing rate in different sessions and different mice are quite different. This observation could be due to the following reasons:
+
+* The probes are inserted into the mice brains at slightly different locations every session and leads to the measurement of different set of neurons. Also the sensitivity of the measurement device may be adjusted differently for each session.
+
+* Mice are different due to their baseline brain activity level. Some mice may be more active even when there is no external stimuli. It is parrallel to the "personality" of the mouse.
+
+* Sessions are different even for the same mouse. This could be due to "mood" of the mouse on different days.
+
+This suggests that it is necessary to consider a different intercept for each session or mouse. Some normalization may also be helpful to make the sessions comparable.
+
+```{r firing rate level difference in each session}
+firing.rate.level = mean.firing.rate %>%
+  group_by(session.id, mouse.name) %>%
+  summarise(mean.rate = mean(mean.firing.rate), sd.mean.rate = sd(mean.firing.rate))
+
+kbl(firing.rate.level, caption = "<center>Summary Statistics of the Mean Firing Rate</center>", align = "l") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  kable_classic_2(full_width = F)
+```
+
+```{r firing rate vs contrasts}
+# ggplot(mean.firing.rate[mean.firing.rate$session.id == 1, ], aes(x=as.factor(contrast.left), y=mean.firing.rate)) + geom_boxplot(aes(fill=as.factor(contrast.right)))
+# 
+# contrast.mean = mean.firing.rate %>%
+#   group_by(session.id, contrast.left, contrast.right) %>%
+#   summarise(mean.rate = mean(mean.firing.rate)) %>%
+#   ungroup()
+# 
+# ggplot(contrast.mean, aes(x=contrast.right, as.factor(contrast.right), fill=mean.rate)) + geom_tile() + facet_wrap(~session.id)
+# 
+# 
+# ggplot(contrast.mean, aes(x=contrast.right, color=as.factor(contrast.left), y=mean.rate)) + geom_line() + geom_point() + facet_wrap(~session.id, scales='free_y')
+
+```
+
+### Firing rate for different contrasts
+
+The main effect and interactions are shown in the following figure. It is observed that:
+
+* Higher contrast on the right side usually leads to higher firing rate. However, the effect for left side is more noisy.
+
+  * This can be explained by the fact that only the brain activity in left hemisphere is recorded, which processes the visual stimulus from the right eye. So the brain activity responds to the right constrast fast and accurate. In the case where the visual stimulus is mainly from the left eye, the information will only propagate to the left hemisphere at a later stage.
+  
+* It seems there are interactions between left and right. But it is difficult to tell for sure from the figure. This will be the hypothesis to be formally tested in the next section.
+
+Here we only visually checked the interaction and we will defer this question to the Inferential Analysis section.
+
+```{r main effect and interaction}
+par(mfrow = c(1,3))
+plotmeans(mean.firing.rate ~ contrast.right, data = mean.firing.rate, xlab = "Right Contrast", ylab = "Mean Firing Rate", main = "Main effect, Right Contrast")
+
+plotmeans(mean.firing.rate ~ contrast.left, data = mean.firing.rate, xlab = "Left Contrast", ylab = "Mean Firing Rate", main = "Main effect, Left Contrast")
+
+right.contrast = mean.firing.rate$contrast.right
+left.contrast = mean.firing.rate$contrast.left
+firing.rate = mean.firing.rate$mean.firing.rate
+interaction.plot(x.factor = right.contrast,
+                 trace.factor = left.contrast,
+                 response = firing.rate,
+                 xlab = "Right Contrast",
+                 ylab = "Mean Firing Rate",
+                 main = "Interaction")
+
+```
+
+
+## Exploration Related to Feedback Type Prediction
+
+### Distribution of Feedback Types
+
+Let's define the success rate as the percentage of trials where the mouse successfully performed the tasks and obtained the reward.
+
+As shown in the following table, the success rate are similar across sessions at around 66%. It is only slightly imbalanced and therefore should not pose a significant challenge to the models for feedback type prediction.
+
+```{r distribution of feedback type}
+
+success.rate = mean.firing.rate %>%
+  group_by(feedback.type, session.id) %>%
+  summarise(n=length(trial.id)) %>%
+  ungroup() %>%
+  pivot_wider(names_from=feedback.type, values_from=n) %>%
+  rename("neg" = "-1", "pos" = "1") %>%
+  mutate(success.rate = pos / (pos + neg))
+
+kbl(success.rate, caption = "<center>Success Rate for Each Session</center>", align = "l") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  kable_classic_2(full_width = F)
+```
+
+
+### Potential Fatigue Effect
+
+While exploring the relation between variables to feedback types, we have an interesting observation: there are more negative feedbacks (i.e., the mouse pressed the wrong pedal) in later trials than in earlier trials.
+
+The following figure shows the density of each feedback type vs trial ID (which is proportionate to the time of the trails). Vertical lines are also added to show the feedback type of each trial ID. It is observed the negative feedback curve ramps up around the 150th trial. Our hypothesis is that the mouse got fatigue after a number of repeated trials and therefore they are more prone to error in a later stage.
+
+```{r}
+ggplot(mean.firing.rate, aes(x=trial.id, group=feedback.type, color=feedback.type)) +
+  geom_density() +
+  geom_segment(data=mean.firing.rate, aes(x=trial.id, y=0, xend=trial.id, yend=0.0008, hue=as.factor(feedback.type)), alpha=0.5) +
+  facet_wrap(~session.id, ncol=2) +
+  xlab("Trial ID") +
+  facet_wrap(~session.id, ncol=2) +
+  ggtitle("Distribution: Mean Firing Rate for Each FeedBack Type in Each Session") +
+  theme(plot.title = element_text(hjust = 0.5, size=10))
+```
+
+The fatigue seems to happen not only in the decision and execution stage. We also observed the visual cortex's response to the stimuli trending down as trial ID increases, as shown in the figure below. The implication to the modeling is that:
+
+* It is difficult to tell if the change in mean firing rate alone is sufficient to model the fatigue effect. So both trial ID and mean firing rate need to be added to the model.
+
+```{r}
+ggplot(mean.firing.rate, aes(x=trial.id, y=mean.firing.rate)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~session.id, ncol=2, scales='free_y') +
+  xlab("Trial ID") +
+  ylab("Mean Firing Rate") +   
+  facet_wrap(~session.id, ncol=2, scales='free_y') +
+  ggtitle("Scatter Plot: Mean Firing Rate vs Trial ID in Each Session") +
+  theme(plot.title = element_text(hjust = 0.5, size=15))
+```
+
+### Firing rate vs feedback type
+
+The firing rates for positive feedback trials are higher than those for negative feedback trials. It suggests the firing rate could be used to predict feedback type.
+
+```{r firing rate vs feedback type}
+ggplot(mean.firing.rate, aes(x=as.factor(feedback.type), y=mean.firing.rate, group=as.factor(feedback.type))) +
+  geom_boxplot() +
+  facet_wrap(~session.id, ncol=5) +
+  xlab("Feedback Type") +
+  ylab("Mean Firing Rate") +
+  ggtitle("Mean Firing Rate v.s. Feedback Type") +
+  theme(plot.title = element_text(hjust = 0.5, size=15))
+```
+
+### Interaction Between Left and Right Contrasts
+
+Both left and right contrasts impact the percentage of positive feedbacks. Furthermore, as observed in the following figure, the mouse movement is less accurate when the left and right contrasts are close. This means some forms of interaction may be useful to train a good model.
+
+```{r}
+feedback.contrast = mean.firing.rate %>% group_by(session.id, mouse.name, contrast.right, contrast.left, feedback.type) %>%
+  summarise(n=length(feedback.type)) %>%
+  ungroup() %>%
+  pivot_wider(names_from=feedback.type, values_from = n) %>%
+  rename("pos" = "1", "neg" = "-1") %>%
+  mutate(pos.rate = pos / (pos + neg))
+
+ggplot(feedback.contrast, aes(x=as.factor(contrast.right), y=as.factor(contrast.left), fill=pos.rate)) +
+  geom_tile() +
+  xlab("Contrast Right") +
+  ylab("Contrast Left") +
+  ggtitle("Positive Rate v.s. Contrasts") +
+  theme(plot.title = element_text(hjust = 0.5, size=15))
+
+```
+
+# Inferencial Analysis
+
+The question of interest is where there is an interaction between the contrasts of the left and right side to impact the visual cortext activity level. A mixed effect ANOVA model is used to answer this question.
+
+In the following, we first define the model and then state the hypothesis in terms of the model parameters, and finally state the conclusion.
+
+## Model Definition
+
+The mixed effect ANOVA model is defined as follows:
+
+$$Y_{i,j,k,l,m} = \mu_{....} + \alpha_i +\beta_j + (\alpha\beta)_{i,j} + \gamma_k+ (\gamma\eta)_{k,l} + \epsilon_{i,j,k,l,m(l)}$$
+
+where $i = 1,...,4$, which indicates the levels of the contrast.right, $j = 1,...,4$, which indicates the levels of the contrast.left, $k = \{1,2\}$, which indicates the levels of the mouse.name, $\{k,l\} \in \{(1,1),(1,2),(1,3),(2,4),(2,5)\}$, which indicates the levels of the interaction between mouse.name and session.id (Note that there are only 5 combinations of k and l due to the nested design), $m(l)$ represents trial ID, which has ranges defined for each session separately as follows: $m(1) \in [1, 214]$, $m(2) \in [1, 251]$, $m(3) \in [1, 228]$, $m(4) \in [1, 249]$, $m(5) \in [1, 254]$.  Here $\sum_{i=1}^4\alpha_i = 0$,  $\sum_{j=1}^4\beta_j = 0$, $\sum_{i=1}^4 (\alpha\beta)_{ij}  =\sum_{j=1}^4 (\alpha\beta)_{ij} =0$, $\gamma_k$ is i.i.d. $N(0,\sigma^2_{\gamma})$, $(\gamma\eta)_{kl}$ is i.i.d. $N(0,\sigma^2_{\gamma\eta})$, $\{\epsilon_{ijklm(l)}\}$ is i.i.d. following $N(0,\sigma^2)$
+
+In the model, $Y_{ijklm(l)}$ represents the mean firing rate of the $k$th mouse in the $l$th session and $m$th trials with $i$th contrast.left, $j$th contrast.right; $\mu....$ is the grand mean firing rate; $\alpha_i$ is the main effect from the $i_{th}$ level of the contrast.right, and the levels of the contrast.right are 0, 0,25, 0,5 and 1; $\beta_j$ is the main effect from $j_{th}$ level of contrast.left, and the levels of the contrast.left are 0, 0,25, 0,5 and 1; $(\alpha\beta)_{ij}$ represents the interaction of the $i_{th}$ contrast.right and $j_{th}$ contrast.left, and the 16 levels of the interaction are combinations of the contrast.right and contrast.left; $\gamma_k$ is the random effect of the mouse, and the mouse only has two levels: Cori and Forssmann; $(\gamma\eta)_{kl}$ is the random effect of the interaction term between mouse and session, and based on the nested design for mouse and session, there are only 5 levels; $\{\epsilon_{ijklm(l)}\}$ captures the remaining unexplained effect; Also, $\{\epsilon_{ijklm(l)}\}$ and $\{\gamma_{k}\}$ and $\{(\gamma\eta)_{kl}\}$ are independent to each other.
+
+## Hypothesis Testing for the Interaction Effect
+
+To identify the importance of the interaction term, we carry out an ANOVA test to decide if the effect of interaction between contrast.right and contrast.left is present in the data set at the significance level of $\alpha=0.05$.
+
+$$
+H_0: (\alpha\beta)_{ij}=0 \text{  } \forall i, j \ {\rm v.s.} \ H_1: {\rm not \ all \ } (\alpha\beta)_{ij} \ {\rm are \ zero}.
+$$
+
+From the ANOVA table below, we know the p-value (0.04129) is smaller than 0.05. which leads us to conclude there is enough evidence to reject $H_0$. This means we believe that, at the significance level of 0.05:
+
+* There is an interaction between the left contrast and right constrast in determining the visual cortex activity following stimuli. 
+
+```{r anova with mouse and session}
+main.model = lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | mouse.name) + (1|mouse.name:session.id), data = mean.firing.rate)
+
+reduced.model.1 = lmer(mean.firing.rate ~ contrast.left + contrast.right + (1 | mouse.name) + (1|mouse.name:session.id),
+                 data = mean.firing.rate)
+
+anova(reduced.model.1,main.model)
+
+# confint(main.model)
+```
+
+# Sensitivity Analysis
+
+## Check Model Assumptions
+
+We first used QQ plot to show how well the residual fits a normal distribution. It is observed that the normality does not hold very well on the two tails of the distribution. From the result of the Shapiro test, we have the p-value of 9.933e-10 < 0.05 (the significance level we choose), which confirmed our observation.
+
+```{r residual}
+# residuals vs fitted value
+plot(main.model, main = ("Residual v.s. Fitted Value"), ylab = "Residuals", xlab = "Fitted Value")
+# dev.new(width=4, height=3)
+
+# Q-Q plot
+qqnorm(summary(main.model)$residual)
+qqline(summary(main.model)$residual)
+
+```
+
+```{r test for Normality assumption}
+main.model.res = summary(main.model)$residuals
+shapiro.test(x = main.model.res)
+``` 
+
+### Variance Homogeneity
+
+From the residual plot, it is observed that the variance is not homogenuous. To get a more reliable result, we also perform the Levene’s tests to check the homogeneity of variance.
+
+Since we are mainly concerned about the effect of contrast.left and right, here we test homogeneity of variance with respect to these two variables. From the results below, we have a p-value of 0.0006078 for contrast.left, p-value of 6.681e-06 for contrast.right, and p-value of 0.02472 for the interaction of contrast.left and right, which indicate that there is enough evidence to claim an unequal variance of the error terms at significance level 0.05. Therefore it violates the homogeneity of error variance assumption in linear models.
+
+There are several possible reasons that lead to this violation:
+
+* The variances of the firing rate in different sessions are different. However, our model does not take this into consideration.
+
+* There may be other factors that impacting the firing rate but are not included in the model.
+
+These could be further investigation directions.
+
+
+```{r test for equal variance}
+# test for homogeneity of variance
+
+leveneTest(residuals(main.model) ~ mean.firing.rate$contrast.left)
+leveneTest(residuals(main.model) ~ mean.firing.rate$contrast.right)
+leveneTest(residuals(main.model) ~ mean.firing.rate$contrast.left*mean.firing.rate$contrast.right)
+ 
+```
+
+## Inclusion of Random Effect
+
+Random effects from session and mouse are assumed to be important in the main result. Here we test if the random effect is necessary. ANOVA tests are performed to compare a model without random effect and two models with random effects.
+
+1. The model with session random effect is significantly better than the model without random effect (p<$2\times10^{-16}$).
+
+2. The model with nested session and mouse random effect is also significantly better than the model without random effect (p<$2\times10^{-16}$).
+
+Based on these observations, we conclude that random effect is a significant component in the model.
+
+```{r}
+model1 <- lm(mean.firing.rate ~ contrast.left * contrast.right, 
+                 data = mean.firing.rate)
+
+model2 <- lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | session.id), 
+                 data = mean.firing.rate)
+
+main.model <- lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | mouse.name) + (1|mouse.name:session.id), 
+                 data = mean.firing.rate)
+
+anova(model2, model1)
+
+```
+
+```{r}
+anova(main.model, model1)
+```
+
+
+## Comparison of Different Model Structures
+
+In the main model, we considered the hierarchical structure of the random effect from mouse and session. Here, we use ANOVA to test if this is necessary. Two reduced models are defined and compared with the full model. The observations are summarized as follows.
+
+1. Only use a random effect from mouse.name. This model will not have a variable to capture the variation between the sessions of the same mouse. The p-value shows a significant difference between this model and the full model. It suggests, the additional term of the interaction between mouse.name and session.id is important.
+
+```{r}
+reduced.model <- lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | mouse.name), 
+                 data = mean.firing.rate)
+
+full.model <- lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | mouse.name) + (1|mouse.name:session.id), 
+                 data = mean.firing.rate)
+anova(full.model, reduced.model)
+
+```
+
+2. Only use a random effect from session.id. The reason for this model specification is that each session are different. And the variation caused by mouse is automatically captured by session.id. However, a potential issue with this approach is that it does not consider the similarity of the sessions that are nested in the same mouse. In the following, we compare this model with the full model. Result suggests the two models are not significantly different (p=0.073). In this project report, we still adopt the full model because:
+
+(a) The reason of the insignificant difference between the two models may just because we are only using a small portion of the data. So there may not be sufficient number of mice or sufficient number of sessions per mouse to make the nested structure useful. Keeping the correct specification may help when applying the model to the full data set.
+
+(b) Since specifying the nested structure does not significantly impact the explained variance, performing inferential analysis with this model should not introduce any significant additional bias.
+
+
+```{r}
+reduced.model <- lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | session.id), 
+                 data = mean.firing.rate)
+
+full.model <- lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | mouse.name) + (1|mouse.name:session.id), 
+                 data = mean.firing.rate)
+anova(full.model, reduced.model)
+```
+
+## Effect of Late Trials
+
+Based on the previous figure, the percentage of correct feedback decreases in the late trials as compared with early trials. Incorporating this effect into the model may further reduce the bias in the inferential analysis.
+
+One way is to directly add the time of each trial as a variable to explain the fatigue of the mice. However, the effect of time may be nonlinear and extra effort may be needed to explore this route.
+
+Here we use a simple approach: from the figures, we observed that the mean firing rate decreases roughly after the 150th trial. So an indicate variable "late" is created to represent if the trial is after the 150th. The model with the variable "late" is compared with the main model used in the previous sections. ANOVA result suggests the model with "late" variable is significantly better than the main model (p=$2\times10^{-16}$).
+
+```{r with and without late trial indicator}
+mean.firing.rate.time = mean.firing.rate
+mean.firing.rate.time$late = (mean.firing.rate.time$trial.id > 150)
+
+full.model <- lmer(mean.firing.rate ~ late + contrast.left * contrast.right + (1 | mouse.name/session.id), 
+                 data = mean.firing.rate.time)
+reduced.model <- lmer(mean.firing.rate ~ contrast.left * contrast.right + (1 | mouse.name/session.id), 
+                 data = mean.firing.rate.time)
+anova(reduced.model,full.model)
+```
+
+Based on this new model with "late" variable, we compared the models with and without the interaction between contrast.left and contrast.right. The result suggests the interaction term is significant (p=0.004). Although this p value is much smaller than the one obtained from the main model (p=0.042). We decide not to use this result as the main result, because the indicator variable "late" is determined manually based on the limited amount of data. It is possible that this threshold of 150 trials exists just by chance. More data is needed before we could obtain a more reliable conclusion from this model.
+
+```{r}
+full.model <- lmer(mean.firing.rate ~ late + contrast.left * contrast.right + (1 | mouse.name/session.id), 
+                 data = mean.firing.rate.time)
+reduced.model <- lmer(mean.firing.rate ~ late + contrast.left + contrast.right + (1 | mouse.name/session.id), 
+                 data = mean.firing.rate.time)
+anova(reduced.model,full.model)
+```
+
+# Predictive Modeling
+
+The second question of interest in this project is to predict if the mouse will perform the required movement. The target variable is encoded as -1 (negative feedback, meaning the mouse did the wrong movement), and 1 (positive feedback, meaning the mouse did the correct movement).
+
+As a first step, we split out the data for session 1 from trial 1 to 100 as the test data. And all the model training are completed on the rest of the data, which is our training data.
+
+```{r trian test split}
+mean.firing.rate$feedback.type = as.factor(mean.firing.rate$feedback.type)
+
+test.indicator = (mean.firing.rate$session.id == 1) & (mean.firing.rate$trial.id <= 100)
+feedback.train.df = mean.firing.rate[!test.indicator, ]
+feedback.test.df = mean.firing.rate[test.indicator, ]
+
+```
+
+## Manual Features Selection
+
+As observed in previous sections, the trail.id is an important variable that impacts both the firing rate and the correctness of the mouse feedback. However, it is unknown if trial.id is still important after the model already considered firing rate. Or in another words, we don't know the relation between the three variables: trial.id (time), firing rate, and feedback correctness.
+
+Here we use likelihood test on models with and without trial.id to explore the answer to this question. As shown below, we compared four models with different features:
+
+* Model 1: include features of `session.id`, `mean.firing.rate`, `contrast.left`, `contrast.right`, and the interaction between the last two.
+
+* Model 2: Added trial.id to represent the fatigue effect.
+
+* Model 3: Added trial.id ^ 2 to consider the nonlinearity in fatigue effect.
+
+* Model 4: Created a set of new features, which is the mean firing rate for different time bins. Because the one number summary of `mean.firing.rate` may hide some useful information which only happens in some time periods.
+
+The likelihood ratio test result for these 4 models are shown below. The result suggests model 4 is the best. This means:
+
+* The fatigue does not only impact the activity of visual cortex, but it may also impact the neurons in the later stage such as the choice stage.
+
+* A time bin level summary of mean firing rate can better capture useful information than a single number summary of the mean firing rate.
+
+```{r}
+
+model.baseline = glm(
+  feedback.type ~ session.id + contrast.left * contrast.right + mean.firing.rate,
+  family='binomial',
+  data=feedback.train.df
+)
+
+model.fatigue = glm(
+  feedback.type ~ session.id + contrast.left * contrast.right + mean.firing.rate + trial.id,
+  family='binomial',
+  data=feedback.train.df
+)
+
+model.fatigue2 = glm(
+  feedback.type ~ session.id + contrast.left * contrast.right + mean.firing.rate + trial.id + I(trial.id^2),
+  family='binomial',
+  data=feedback.train.df
+)
+
+model.fatigue2.rates = glm(
+  feedback.type ~ session.id + contrast.left * contrast.right + mean.firing.rate + mean.firing.rate1 + mean.firing.rate2 + mean.firing.rate3 + mean.firing.rate4 + mean.firing.rate5 + trial.id + I(trial.id^2),
+  family='binomial',
+  data=feedback.train.df
+)
+
+# summary(model.fatigue2.rates)
+
+lrtest(model.baseline, model.fatigue, model.fatigue2, model.fatigue2.rates)
+```
+
+We also tested the performance of model 4 on test data. The metrics we used include sensitivity, specificity and AUC. The result is shown in the following table. It is observed that model 4 performs reasonably well with an AUC of 0.728. The training set performance is also included in order to see how much of overfitting is present. Since the training AUC is 0.740, which is very close to the test AUC, we also know that overfit is not severe in this model training process.
+
+```{r test performance}
+get.test.perf = function(model, test.df, method='glm') {
+  if (method == 'glm') {
+    fitted.value = predict(model, test.df)
+  } else if (method == 'rf') {
+    fitted.value = predict(rf, test.df, type='prob')[, 2]
+  }
+  n.pos = sum(test.df$feedback.type == 1)
+  n.tp = sum((test.df$feedback.type == 1) & (fitted.value >= 0.5))
+  n.neg = sum(test.df$feedback.type == -1)
+  n.tn = sum((test.df$feedback.type == -1) & (fitted.value < 0.5))
+  
+  sensitivity = n.tp / n.pos
+  specificity = n.tn / n.neg
+
+  auc = roc(test.df$feedback.type, fitted.value)$auc
+  
+  return(c(sensitivity=sensitivity, specificity=specificity, auc=auc))
+}
+
+# get.test.perf(model.fatigue2, feedback.train.df)
+# get.test.perf(model.fatigue2.rates, feedback.train.df)
+# 
+# get.test.perf(model.fatigue2, feedback.test.df)
+# get.test.perf(model.fatigue2.rates, feedback.test.df)
+
+auc.matrix= matrix(c(0.7412096, 0.6181818, 0.7396424, 0.9054054, 0.2692308, 0.7281705),ncol =3, byrow = TRUE)
+colnames(auc.matrix) = c("Sensitivity", "Specificity", "AUC")
+rownames(auc.matrix) = c("Training","Testing")
+auc = as.table(auc.matrix)
+
+kbl(auc, caption = "<center>Performance of Model 4 on Training and Testing Data</center>", align = "l") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  kable_classic_2(full_width = T)
+
+```
+
+### Random Forest
+
+We also trained a model based on random forest using the same set of features. Since random forest can handle nonlinear relations and interactions to some degree, we did not include these nonlinear transform or interaction in the model.
+
+The results on testing set is shown below. The AUC is 0.741, which is better than the logistic regression model 4 in the previous sub-section.
+
+```{r random forest}
+
+library(randomForest)
+set.seed(2023)
+rf <- randomForest(feedback.type ~ session.id + contrast.left + contrast.right + mean.firing.rate + mean.firing.rate1 + mean.firing.rate2 + mean.firing.rate3 + mean.firing.rate4 + mean.firing.rate5 + trial.id, data=feedback.train.df)
+
+# get.test.perf(rf, feedback.test.df, 'rf')
+
+auc.matrix= matrix(c(0.97297297, 0.07692308, 0.74090437),ncol =3, byrow = TRUE)
+colnames(auc.matrix) = c("Sensitivity", "Specificity", "AUC")
+rownames(auc.matrix) = c("")
+auc.rf = as.table(auc.matrix)
+
+kbl(auc.rf, caption = "<center>Random Forest Model Performance</center>", align = "l") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  kable_classic_2(full_width = F)
+
+```
+
+# Conclusion
+
+In this project, we explore a mouse neuron activity data to understand how visual stimuli impact visual cortex neuron activities. And also explored how the correctness of the mice response could be predicted based on neuronal readings.
+
+The interesting findings include:
+
+* The mouse brain activities are impacted by the stimuli from both their left and right eyes. The interactions between the left and right stimuli are also important to model the mouse brain activities.
+
+* The mouse movement correctness can also be predicted based on the neuron spike recordings. Using a random forest model with some minor feature engineering effort, we are able to achieve a 0.74 AUC for predicting if the mouse will respond correctly. The features used in this model helped us to learn some knowledge about the mouse's response to the stimuli. More specifically, we discovered that:
+
+  * The mouse may have fatigue effect which makes later trials more prone to error. This may suggest we either correct this potential bias by adding features to our model, or improve our experiment design in future experiments.
+ 
+
+
+
+# Reference {-}
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+Douglas Bates, Martin Mächler, Benjamin M. Bolker. et al. Fitting Linear Mixed-Effects Models Using lme4. Journal of Statistical Software, Oct. (2015). https://www.jstatsoft.org/article/view/v067i01/ 
+
+Sklearn. https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html
